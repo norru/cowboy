@@ -16,7 +16,7 @@
 -module(cowboy_acceptor).
 
 -export([start_link/6]). %% API.
--export([acceptor/7]). %% Internal.
+-export([init/6, acceptor/6]). %% Internal.
 
 %% API.
 
@@ -24,34 +24,56 @@
 	pid(), pid()) -> {ok, pid()}.
 start_link(LSocket, Transport, Protocol, Opts,
 		ListenerPid, ReqsSup) ->
-	Pid = spawn_link(?MODULE, acceptor,
-		[LSocket, Transport, Protocol, Opts, 1, ListenerPid, ReqsSup]),
+	Pid = spawn_link(?MODULE, init,
+		[LSocket, Transport, Protocol, Opts, ListenerPid, ReqsSup]),
 	{ok, Pid}.
 
 %% Internal.
 
--spec acceptor(inet:socket(), module(), module(), any(),
-	non_neg_integer(), pid(), pid()) -> no_return().
-acceptor(LSocket, Transport, Protocol, Opts, OptsVsn, ListenerPid, ReqsSup) ->
-	Res = case Transport:accept(LSocket, 2000) of
-		{ok, CSocket} ->
-			{ok, Pid} = supervisor:start_child(ReqsSup,
+-spec init(inet:socket(), module(), module(), any(),
+	pid(), pid()) -> no_return().
+init(LSocket, Transport, Protocol, Opts, ListenerPid, ReqsSup) ->
+	cowboy_listener:acceptor_init_ack(ListenerPid),
+	acceptor(LSocket, Transport, Protocol, Opts, ListenerPid, ReqsSup).
+
+-spec acceptor(inet:socket(), module(), module(), any(), pid(), pid())
+	-> no_return().
+acceptor(LSocket, Transport, Protocol, Opts, ListenerPid, ReqsSup) ->
+	async_accept(LSocket, Transport, self()),
+	receive
+		{accept, CSocket} ->
+			{ok, ConnPid} = supervisor:start_child(ReqsSup,
 				[ListenerPid, CSocket, Transport, Protocol, Opts]),
-			Transport:controlling_process(CSocket, Pid),
-			cowboy_listener:add_connection(ListenerPid,
-				default, Pid, OptsVsn);
-		{error, timeout} ->
-			cowboy_listener:check_upgrades(ListenerPid, OptsVsn);
-		{error, _Reason} ->
-			%% @todo Probably do something here. If the socket was closed,
-			%%       we may want to try and listen again on the port?
-			ok
-	end,
-	case Res of
-		ok ->
+			Transport:controlling_process(CSocket, ConnPid),
+			cowboy_listener:add_connection(ListenerPid, default, ConnPid),
+			ConnPid ! {shoot, ListenerPid},
+			%% We want to suspend before accepting another connection.
+			receive suspend ->
+				receive resume -> flush() end
+			after 0 ->
+				ok
+			end,
 			?MODULE:acceptor(LSocket, Transport, Protocol,
-				Opts, OptsVsn, ListenerPid, ReqsSup);
-		{upgrade, Opts2, OptsVsn2} ->
+				Opts, ListenerPid, ReqsSup);
+		{upgrade, Opts2} ->
 			?MODULE:acceptor(LSocket, Transport, Protocol,
-				Opts2, OptsVsn2, ListenerPid, ReqsSup)
+				Opts2, ListenerPid, ReqsSup)
+	end.
+
+-spec async_accept(inet:socket(), module(), pid()) -> ok.
+async_accept(LSocket, Transport, AcceptorPid) ->
+	_ = spawn_link(fun() ->
+		{ok, CSocket} = Transport:accept(LSocket, infinity),
+		Transport:controlling_process(CSocket, AcceptorPid),
+		AcceptorPid ! {accept, CSocket}
+	end),
+	ok.
+
+-spec flush() -> ok.
+flush() ->
+	receive
+		suspend -> flush();
+		resume -> flush()
+	after 0 ->
+		ok
 	end.
