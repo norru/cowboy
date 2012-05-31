@@ -8,7 +8,7 @@
 	websocket_info/3, websocket_terminate/3]).
 
 init(_Any, _Req, _Opts) ->
-	{upgrade, protocol, cowboy_http_websocket}.
+	{upgrade, protocol, cowboy_websocket}.
 
 handle(_Req, _State) ->
 	exit(badarg).
@@ -17,7 +17,7 @@ terminate(_Req, _State) ->
 	exit(badarg).
 
 websocket_init(_TransportName, Req, _Opts) ->
-	{ok, Req2} = cowboy_http_req:reply(403, Req),
+	{ok, Req2} = cowboy_req:reply(403, Req),
 	{shutdown, Req2}.
 
 websocket_handle(_Frame, _Req, _State) ->

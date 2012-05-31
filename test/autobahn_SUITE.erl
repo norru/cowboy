@@ -35,6 +35,7 @@ groups() ->
 	BaseTests = [run_tests],
 	[{autobahn, [], BaseTests}].
 
+%% @todo 
 init_per_suite(Config) ->
 	application:start(inets),
 	application:start(cowboy),
@@ -61,10 +62,8 @@ end_per_suite(_Config) ->
 
 init_per_group(autobahn, Config) ->
 	Port = 33080,
-	cowboy:start_listener(autobahn, 100,
-		cowboy_tcp_transport, [{port, Port}],
-		cowboy_http_protocol, [{dispatch, init_dispatch()}]
-	),
+	cowboy:start_http(autobahn, 100,
+		[{port, Port}], [{dispatch, init_dispatch()}]),
 	[{port, Port}|Config].
 
 end_per_group(Listener, _Config) ->

@@ -128,31 +128,29 @@ groups() ->
 
 init_per_suite(Config) ->
 	application:start(inets),
+	application:start(ranch),
 	application:start(cowboy),
 	Config.
 
 end_per_suite(_Config) ->
 	application:stop(cowboy),
+	application:stop(ranch),
 	application:stop(inets),
 	ok.
 
 init_per_group(http, Config) ->
 	Port = 33080,
-	Transport = cowboy_tcp_transport,
 	Config1 = init_static_dir(Config),
-	{ok, _} = cowboy:start_listener(http, 100,
-		Transport, [{port, Port}],
-		cowboy_http_protocol, [
-			{dispatch, init_dispatch(Config1)},
-			{max_keepalive, 50},
-			{timeout, 500}]
-	),
+	{ok, _} = cowboy:start_http(http, 100, [{port, Port}], [
+		{dispatch, init_dispatch(Config1)},
+		{max_keepalive, 50},
+		{timeout, 500}
+	]),
 	{ok, Client} = cowboy_client:init([]),
 	[{scheme, <<"http">>}, {port, Port}, {opts, []},
-		{transport, Transport}, {client, Client}|Config1];
+		{transport, ranch_tcp}, {client, Client}|Config1];
 init_per_group(https, Config) ->
 	Port = 33081,
-	Transport = cowboy_ssl_transport,
 	Opts = [
 		{certfile, ?config(data_dir, Config) ++ "cert.pem"},
 		{keyfile, ?config(data_dir, Config) ++ "key.pem"},
@@ -162,44 +160,36 @@ init_per_group(https, Config) ->
 	application:start(crypto),
 	application:start(public_key),
 	application:start(ssl),
-	{ok, _} = cowboy:start_listener(https, 100,
-		Transport, Opts ++ [{port, Port}],
-		cowboy_http_protocol, [
-			{dispatch, init_dispatch(Config1)},
-			{max_keepalive, 50},
-			{timeout, 500}]
-	),
+	{ok, _} = cowboy:start_https(https, 100, Opts ++ [{port, Port}], [
+		{dispatch, init_dispatch(Config1)},
+		{max_keepalive, 50},
+		{timeout, 500}
+	]),
 	{ok, Client} = cowboy_client:init(Opts),
 	[{scheme, <<"https">>}, {port, Port}, {opts, Opts},
-		{transport, Transport}, {client, Client}|Config1];
+		{transport, ranch_ssl}, {client, Client}|Config1];
 init_per_group(onrequest, Config) ->
 	Port = 33082,
-	Transport = cowboy_tcp_transport,
-	{ok, _} = cowboy:start_listener(onrequest, 100,
-		Transport, [{port, Port}],
-		cowboy_http_protocol, [
-			{dispatch, init_dispatch(Config)},
-			{max_keepalive, 50},
-			{onrequest, fun onrequest_hook/1},
-			{timeout, 500}
-		]),
+	{ok, _} = cowboy:start_http(onrequest, 100, [{port, Port}], [
+		{dispatch, init_dispatch(Config)},
+		{max_keepalive, 50},
+		{onrequest, fun onrequest_hook/1},
+		{timeout, 500}
+	]),
 	{ok, Client} = cowboy_client:init([]),
 	[{scheme, <<"http">>}, {port, Port}, {opts, []},
-		{transport, Transport}, {client, Client}|Config];
+		{transport, ranch_tcp}, {client, Client}|Config];
 init_per_group(onresponse, Config) ->
 	Port = 33083,
-	Transport = cowboy_tcp_transport,
-	{ok, _} = cowboy:start_listener(onresponse, 100,
-		Transport, [{port, Port}],
-		cowboy_http_protocol, [
-			{dispatch, init_dispatch(Config)},
-			{max_keepalive, 50},
-			{onresponse, fun onresponse_hook/3},
-			{timeout, 500}
-		]),
+	{ok, _} = cowboy:start_http(onresponse, 100, [{port, Port}], [
+		{dispatch, init_dispatch(Config)},
+		{max_keepalive, 50},
+		{onresponse, fun onresponse_hook/3},
+		{timeout, 500}
+	]),
 	{ok, Client} = cowboy_client:init([]),
 	[{scheme, <<"http">>}, {port, Port}, {opts, []},
-		{transport, Transport}, {client, Client}|Config].
+		{transport, ranch_tcp}, {client, Client}|Config].
 
 end_per_group(https, Config) ->
 	cowboy:stop_listener(https),
@@ -233,21 +223,21 @@ init_dispatch(Config) ->
 				[{body, <<"A flameless dance does not equal a cycle">>}]},
 			{[<<"stream_body">>, <<"set_resp">>], http_handler_stream_body,
 				[{reply, set_resp}, {body, <<"stream_body_set_resp">>}]},
-			{[<<"static">>, '...'], cowboy_http_static,
+			{[<<"static">>, '...'], cowboy_static,
 				[{directory, ?config(static_dir, Config)},
 				 {mimetypes, [{<<".css">>, [<<"text/css">>]}]}]},
-			{[<<"static_mimetypes_function">>, '...'], cowboy_http_static,
+			{[<<"static_mimetypes_function">>, '...'], cowboy_static,
 				[{directory, ?config(static_dir, Config)},
 				 {mimetypes, {fun(Path, data) when is_binary(Path) ->
 					[<<"text/html">>] end, data}}]},
 			{[<<"handler_errors">>], http_handler_errors, []},
-			{[<<"static_attribute_etag">>, '...'], cowboy_http_static,
+			{[<<"static_attribute_etag">>, '...'], cowboy_static,
 				[{directory, ?config(static_dir, Config)},
 				 {etag, {attributes, [filepath, filesize, inode, mtime]}}]},
-			{[<<"static_function_etag">>, '...'], cowboy_http_static,
+			{[<<"static_function_etag">>, '...'], cowboy_static,
 				[{directory, ?config(static_dir, Config)},
 				 {etag, {fun static_function_etag/2, etag_data}}]},
-			{[<<"static_specify_file">>, '...'],  cowboy_http_static,
+			{[<<"static_specify_file">>, '...'],  cowboy_static,
 				[{directory, ?config(static_dir, Config)},
 				 {mimetypes, [{<<".css">>, [<<"text/css">>]}]},
 				 {file, <<"test_file.css">>}]},
@@ -493,9 +483,9 @@ http10_chunkless(Config) ->
 http10_hostless(Config) ->
 	Port10 = ?config(port, Config) + 10,
 	Name = list_to_atom("http10_hostless_" ++ integer_to_list(Port10)),
-	cowboy:start_listener(Name, 5,
+	ranch:start_listener(Name, 5,
 		?config(transport, Config), ?config(opts, Config) ++ [{port, Port10}],
-		cowboy_http_protocol, [
+		cowboy_protocol, [
 			{dispatch, [{'_', [
 				{[<<"http1.0">>, <<"hostless">>], http_handler, []}]}]},
 			{max_keepalive, 50},
@@ -603,13 +593,13 @@ onrequest_reply(Config) ->
 
 %% Hook for the above onrequest tests.
 onrequest_hook(Req) ->
-	case cowboy_http_req:qs_val(<<"reply">>, Req) of
+	case cowboy_req:qs_val(<<"reply">>, Req) of
 		{undefined, Req2} ->
-			{ok, Req3} = cowboy_http_req:set_resp_header(
+			{ok, Req3} = cowboy_req:set_resp_header(
 				'Server', <<"Serenity">>, Req2),
 			Req3;
 		{_, Req2} ->
-			{ok, Req3} = cowboy_http_req:reply(
+			{ok, Req3} = cowboy_req:reply(
 				200, [], <<"replied!">>, Req2),
 			Req3
 	end.
@@ -632,7 +622,7 @@ onresponse_reply(Config) ->
 
 %% Hook for the above onresponse tests.
 onresponse_hook(_, Headers, Req) ->
-	{ok, Req2} = cowboy_http_req:reply(
+	{ok, Req2} = cowboy_req:reply(
 		<<"777 Lucky">>, [{<<"x-hook">>, <<"onresponse">>}|Headers], Req),
 	Req2.
 

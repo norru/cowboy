@@ -17,7 +17,7 @@
 %% When using websockets, make sure that the crypto application is
 %% included in your release. If you are not using releases then there
 %% is no need for concern as crypto is already included.
--module(cowboy_http_websocket).
+-module(cowboy_websocket).
 
 -export([upgrade/4]). %% API.
 -export([handler_loop/4]). %% Internal.
@@ -57,7 +57,7 @@
 %% in your <em>cowboy_http_handler:init/3</em> handler function.
 -spec upgrade(pid(), module(), any(), #http_req{}) -> closed.
 upgrade(ListenerPid, Handler, Opts, Req) ->
-	cowboy_listener:move_connection(ListenerPid, websocket, self()),
+	ranch_listener:move_connection(ListenerPid, websocket, self()),
 	case catch websocket_upgrade(#state{handler=Handler, opts=Opts}, Req) of
 		{ok, State, Req2} -> handler_init(State, Req2);
 		{'EXIT', _Reason} -> upgrade_error(Req)
@@ -66,11 +66,11 @@ upgrade(ListenerPid, Handler, Opts, Req) ->
 -spec websocket_upgrade(#state{}, #http_req{}) -> {ok, #state{}, #http_req{}}.
 websocket_upgrade(State, Req) ->
 	{ConnTokens, Req2}
-		= cowboy_http_req:parse_header('Connection', Req),
+		= cowboy_req:parse_header('Connection', Req),
 	true = lists:member(<<"upgrade">>, ConnTokens),
 	%% @todo Should probably send a 426 if the Upgrade header is missing.
-	{[<<"websocket">>], Req3} = cowboy_http_req:parse_header('Upgrade', Req2),
-	{Version, Req4} = cowboy_http_req:header(<<"Sec-Websocket-Version">>, Req3),
+	{[<<"websocket">>], Req3} = cowboy_req:parse_header('Upgrade', Req2),
+	{Version, Req4} = cowboy_req:header(<<"Sec-Websocket-Version">>, Req3),
 	websocket_upgrade(Version, State, Req4).
 
 %% @todo Handle the Sec-Websocket-Protocol header.
@@ -84,9 +84,9 @@ websocket_upgrade(State, Req) ->
 %% a reply before sending it. Therefore we calculate the challenge
 %% key only in websocket_handshake/3.
 websocket_upgrade(undefined, State, Req=#http_req{meta=Meta}) ->
-	{Origin, Req2} = cowboy_http_req:header(<<"Origin">>, Req),
-	{Key1, Req3} = cowboy_http_req:header(<<"Sec-Websocket-Key1">>, Req2),
-	{Key2, Req4} = cowboy_http_req:header(<<"Sec-Websocket-Key2">>, Req3),
+	{Origin, Req2} = cowboy_req:header(<<"Origin">>, Req),
+	{Key1, Req3} = cowboy_req:header(<<"Sec-Websocket-Key1">>, Req2),
+	{Key2, Req4} = cowboy_req:header(<<"Sec-Websocket-Key2">>, Req3),
 	false = lists:member(undefined, [Origin, Key1, Key2]),
 	EOP = binary:compile_pattern(<< 255 >>),
 	{ok, State#state{version=0, origin=Origin, challenge={Key1, Key2},
@@ -95,7 +95,7 @@ websocket_upgrade(undefined, State, Req=#http_req{meta=Meta}) ->
 websocket_upgrade(Version, State, Req=#http_req{meta=Meta})
 		when Version =:= <<"7">>; Version =:= <<"8">>;
 			Version =:= <<"13">> ->
-	{Key, Req2} = cowboy_http_req:header(<<"Sec-Websocket-Key">>, Req),
+	{Key, Req2} = cowboy_req:header(<<"Sec-Websocket-Key">>, Req),
 	false = Key =:= undefined,
 	Challenge = hybi_challenge(Key),
 	IntVersion = list_to_integer(binary_to_list(Version)),
@@ -131,16 +131,16 @@ handler_init(State=#state{handler=Handler, opts=Opts},
 
 -spec upgrade_error(#http_req{}) -> closed.
 upgrade_error(Req) ->
-	{ok, _Req2} = cowboy_http_req:reply(400, [], [],
+	{ok, _Req2} = cowboy_req:reply(400, [], [],
 		Req#http_req{resp_state=waiting}),
 	closed.
 
-%% @see cowboy_http_protocol:ensure_response/1
+%% @see cowboy_protocol:ensure_response/1
 -spec upgrade_denied(#http_req{}) -> closed.
 upgrade_denied(#http_req{resp_state=done}) ->
 	closed;
 upgrade_denied(Req=#http_req{resp_state=waiting}) ->
-	{ok, _Req2} = cowboy_http_req:reply(400, [], [], Req),
+	{ok, _Req2} = cowboy_req:reply(400, [], [], Req),
 	closed;
 upgrade_denied(#http_req{method='HEAD', resp_state=chunks}) ->
 	closed;
@@ -155,24 +155,24 @@ websocket_handshake(State=#state{version=0, origin=Origin,
 		transport=Transport, raw_host=Host, port=Port,
 		raw_path=Path, raw_qs=QS}, HandlerState) ->
 	Location = hixie76_location(Transport:name(), Host, Port, Path, QS),
-	{ok, Req2} = cowboy_http_req:upgrade_reply(
+	{ok, Req2} = cowboy_req:upgrade_reply(
 		<<"101 WebSocket Protocol Handshake">>,
 		[{<<"Upgrade">>, <<"WebSocket">>},
 		 {<<"Sec-Websocket-Location">>, Location},
 		 {<<"Sec-Websocket-Origin">>, Origin}],
 		Req#http_req{resp_state=waiting}),
 	%% Flush the resp_sent message before moving on.
-	receive {cowboy_http_req, resp_sent} -> ok after 0 -> ok end,
+	receive {cowboy_req, resp_sent} -> ok after 0 -> ok end,
 	%% We replied with a proper response. Proxies should be happy enough,
 	%% we can now read the 8 last bytes of the challenge keys and send
 	%% the challenge response directly to the socket.
 	%%
 	%% We use a trick here to read exactly 8 bytes of the body regardless
 	%% of what's in the buffer.
-	{ok, Req3} = cowboy_http_req:init_stream(
+	{ok, Req3} = cowboy_req:init_stream(
 		fun cowboy_http:te_identity/2, {0, 8},
 		fun cowboy_http:ce_identity/1, Req2),
-	case cowboy_http_req:body(Req3) of
+	case cowboy_req:body(Req3) of
 		{ok, Key3, Req4} ->
 			Challenge = hixie76_challenge(Key1, Key2, Key3),
 			Transport:send(Socket, Challenge),
@@ -183,13 +183,13 @@ websocket_handshake(State=#state{version=0, origin=Origin,
 	end;
 websocket_handshake(State=#state{challenge=Challenge},
 		Req=#http_req{transport=Transport}, HandlerState) ->
-	{ok, Req2} = cowboy_http_req:upgrade_reply(
+	{ok, Req2} = cowboy_req:upgrade_reply(
 		101,
 		[{<<"Upgrade">>, <<"websocket">>},
 		 {<<"Sec-Websocket-Accept">>, Challenge}],
 		Req#http_req{resp_state=waiting}),
 	%% Flush the resp_sent message before moving on.
-	receive {cowboy_http_req, resp_sent} -> ok after 0 -> ok end,
+	receive {cowboy_req, resp_sent} -> ok after 0 -> ok end,
 	handler_before_loop(State#state{messages=Transport:messages()},
 		Req2, HandlerState, <<>>).
 

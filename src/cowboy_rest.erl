@@ -18,7 +18,7 @@
 %% can be found in the Webmachine source tree, and on the Webmachine
 %% documentation available at http://wiki.basho.com/Webmachine.html
 %% at the time of writing.
--module(cowboy_http_rest).
+-module(cowboy_rest).
 -export([upgrade/4]).
 
 -record(state, {
@@ -74,7 +74,7 @@ upgrade(_ListenerPid, Handler, Opts, Req) ->
 			"   for the reason ~p:~p~n** Options were ~p~n"
 			"** Request was ~p~n** Stacktrace: ~p~n~n",
 			[Handler, Class, Reason, Opts, PLReq, erlang:get_stacktrace()]),
-		{ok, _Req2} = cowboy_http_req:reply(500, Req),
+		{ok, _Req2} = cowboy_req:reply(500, Req),
 		close
 	end.
 
@@ -121,7 +121,7 @@ allowed_methods(Req=#http_req{method=Method}, State) ->
 	end.
 
 method_not_allowed(Req, State, Methods) ->
-	{ok, Req2} = cowboy_http_req:set_resp_header(
+	{ok, Req2} = cowboy_req:set_resp_header(
 		<<"Allow">>, method_not_allowed_build(Methods, []), Req),
 	respond(Req2, State, 405).
 
@@ -148,7 +148,7 @@ is_authorized(Req, State) ->
 		{true, Req2, HandlerState} ->
 			forbidden(Req2, State#state{handler_state=HandlerState});
 		{{false, AuthHead}, Req2, HandlerState} ->
-			{ok, Req3} = cowboy_http_req:set_resp_header(
+			{ok, Req3} = cowboy_req:set_resp_header(
 				<<"Www-Authenticate">>, AuthHead, Req2),
 			respond(Req3, State#state{handler_state=HandlerState}, 401)
 	end.
@@ -206,7 +206,7 @@ content_types_provided(Req=#http_req{meta=Meta}, State) ->
 		    CTP2 = [normalize_content_types_provided(P) || P <- CTP],
 			State2 = State#state{
 				handler_state=HandlerState, content_types_p=CTP2},
-			{Accept, Req3} = cowboy_http_req:parse_header('Accept', Req2),
+			{Accept, Req3} = cowboy_req:parse_header('Accept', Req2),
 			case Accept of
 				undefined ->
 					{PMT, _Fun} = HeadCTP = hd(CTP2),
@@ -301,7 +301,7 @@ languages_provided(Req, State) ->
 		{LP, Req2, HandlerState} ->
 			State2 = State#state{handler_state=HandlerState, languages_p=LP},
 			{AcceptLanguage, Req3} =
-				cowboy_http_req:parse_header('Accept-Language', Req2),
+				cowboy_req:parse_header('Accept-Language', Req2),
 			case AcceptLanguage of
 				undefined ->
 					set_language(Req3, State2#state{language_a=hd(LP)});
@@ -347,7 +347,7 @@ match_language(Req, State, Accept, [Provided|Tail],
 	end.
 
 set_language(Req=#http_req{meta=Meta}, State=#state{language_a=Language}) ->
-	{ok, Req2} = cowboy_http_req:set_resp_header(
+	{ok, Req2} = cowboy_req:set_resp_header(
 		<<"Content-Language">>, Language, Req),
 	charsets_provided(Req2#http_req{meta=[{language, Language}|Meta]}, State).
 
@@ -364,7 +364,7 @@ charsets_provided(Req, State) ->
 		{CP, Req2, HandlerState} ->
 			State2 = State#state{handler_state=HandlerState, charsets_p=CP},
 			{AcceptCharset, Req3} =
-				cowboy_http_req:parse_header('Accept-Charset', Req2),
+				cowboy_req:parse_header('Accept-Charset', Req2),
 			case AcceptCharset of
 				undefined ->
 					set_content_type(Req3, State2#state{charset_a=hd(CP)});
@@ -412,7 +412,7 @@ set_content_type(Req=#http_req{meta=Meta}, State=#state{
 		undefined -> ContentType;
 		Charset -> [ContentType, <<"; charset=">>, Charset]
 	end,
-	{ok, Req2} = cowboy_http_req:set_resp_header(
+	{ok, Req2} = cowboy_req:set_resp_header(
 		<<"Content-Type">>, ContentType2, Req),
 	encodings_provided(Req2#http_req{meta=[{charset, Charset}|Meta]}, State).
 
@@ -467,7 +467,7 @@ variances(Req, State=#state{content_types_p=CTP,
 		[] ->
 			resource_exists(Req3, State2);
 		[[<<", ">>, H]|Variances5] ->
-			{ok, Req4} = cowboy_http_req:set_resp_header(
+			{ok, Req4} = cowboy_req:set_resp_header(
 				<<"Variances">>, [H|Variances5], Req3),
 			resource_exists(Req4, State2)
 	end.
@@ -477,7 +477,7 @@ resource_exists(Req, State) ->
 		fun if_match_exists/2, fun if_match_musnt_exist/2).
 
 if_match_exists(Req, State) ->
-	case cowboy_http_req:parse_header('If-Match', Req) of
+	case cowboy_req:parse_header('If-Match', Req) of
 		{undefined, Req2} ->
 			if_unmodified_since_exists(Req2, State);
 		{'*', Req2} ->
@@ -495,13 +495,13 @@ if_match(Req, State, EtagsList) ->
 	end.
 
 if_match_musnt_exist(Req, State) ->
-	case cowboy_http_req:header('If-Match', Req) of
+	case cowboy_req:header('If-Match', Req) of
 		{undefined, Req2} -> is_put_to_missing_resource(Req2, State);
 		{_Any, Req2} -> precondition_failed(Req2, State)
 	end.
 
 if_unmodified_since_exists(Req, State) ->
-	case cowboy_http_req:parse_header('If-Unmodified-Since', Req) of
+	case cowboy_req:parse_header('If-Unmodified-Since', Req) of
 		{undefined, Req2} ->
 			if_none_match_exists(Req2, State);
 		{{error, badarg}, Req2} ->
@@ -519,7 +519,7 @@ if_unmodified_since(Req, State, IfUnmodifiedSince) ->
 	end.
 
 if_none_match_exists(Req, State) ->
-	case cowboy_http_req:parse_header('If-None-Match', Req) of
+	case cowboy_req:parse_header('If-None-Match', Req) of
 		{undefined, Req2} ->
 			if_modified_since_exists(Req2, State);
 		{'*', Req2} ->
@@ -547,7 +547,7 @@ precondition_is_head_get(Req, State) ->
 	precondition_failed(Req, State).
 
 if_modified_since_exists(Req, State) ->
-	case cowboy_http_req:parse_header('If-Modified-Since', Req) of
+	case cowboy_req:parse_header('If-Modified-Since', Req) of
 		{undefined, Req2} ->
 			method(Req2, State);
 		{{error, badarg}, Req2} ->
@@ -594,7 +594,7 @@ is_put_to_missing_resource(Req, State) ->
 moved_permanently(Req, State, OnFalse) ->
 	case call(Req, State, moved_permanently) of
 		{{true, Location}, Req2, HandlerState} ->
-			{ok, Req3} = cowboy_http_req:set_resp_header(
+			{ok, Req3} = cowboy_req:set_resp_header(
 				<<"Location">>, Location, Req2),
 			respond(Req3, State#state{handler_state=HandlerState}, 301);
 		{false, Req2, HandlerState} ->
@@ -615,7 +615,7 @@ previously_existed(Req, State) ->
 moved_temporarily(Req, State) ->
 	case call(Req, State, moved_temporarily) of
 		{{true, Location}, Req2, HandlerState} ->
-			{ok, Req3} = cowboy_http_req:set_resp_header(
+			{ok, Req3} = cowboy_req:set_resp_header(
 				<<"Location">>, Location, Req2),
 			respond(Req3, State#state{handler_state=HandlerState}, 307);
 		{false, Req2, HandlerState} ->
@@ -665,7 +665,7 @@ create_path(Req=#http_req{meta=Meta}, State) ->
 		{Path, Req2, HandlerState} ->
 			Location = create_path_location(Req2, Path),
 			State2 = State#state{handler_state=HandlerState},
-			{ok, Req3} = cowboy_http_req:set_resp_header(
+			{ok, Req3} = cowboy_req:set_resp_header(
 				<<"Location">>, Location, Req2),
 			put_resource(Req3#http_req{meta=[{put_path, Path}|Meta]},
 				State2, 303)
@@ -716,7 +716,7 @@ put_resource(Req=#http_req{raw_path=RawPath, meta=Meta}, State) ->
 %% pushed to the resource in the request body. The path to the new resource
 %% may be different from the request path, and is stored as request metadata.
 %% It is always defined past this point. It can be retrieved as demonstrated:
-%%     {PutPath, Req2} = cowboy_http_req:meta(put_path, Req)
+%%     {PutPath, Req2} = cowboy_req:meta(put_path, Req)
 put_resource(Req, State, OnTrue) ->
 	case call(Req, State, content_types_accepted) of
 		no_call ->
@@ -726,7 +726,7 @@ put_resource(Req, State, OnTrue) ->
 		{CTA, Req2, HandlerState} ->
 			State2 = State#state{handler_state=HandlerState},
 			{ContentType, Req3}
-				= cowboy_http_req:parse_header('Content-Type', Req2),
+				= cowboy_req:parse_header('Content-Type', Req2),
 			choose_content_type(Req3, State2, OnTrue, ContentType, CTA)
 	end.
 
@@ -755,13 +755,13 @@ choose_content_type(Req, State, OnTrue, ContentType, [_Any|Tail]) ->
 %% This is easily testable because we would have set the Location
 %% header by this point if we did so.
 is_new_resource(Req, State) ->
-	case cowboy_http_req:has_resp_header(<<"Location">>, Req) of
+	case cowboy_req:has_resp_header(<<"Location">>, Req) of
 		true -> respond(Req, State, 201);
 		false -> has_resp_body(Req, State)
 	end.
 
 has_resp_body(Req, State) ->
-	case cowboy_http_req:has_resp_body(Req) of
+	case cowboy_req:has_resp_body(Req) of
 		true -> multiple_choices(Req, State);
 		false -> respond(Req, State, 204)
 	end.
@@ -779,7 +779,7 @@ set_resp_body(Req=#http_req{method=Method},
 			Req4 = Req3;
 		LastModified ->
 			LastModifiedStr = httpd_util:rfc1123_date(LastModified),
-			{ok, Req4} = cowboy_http_req:set_resp_header(
+			{ok, Req4} = cowboy_req:set_resp_header(
 				<<"Last-Modified">>, LastModifiedStr, Req3)
 	end,
 	{Req5, State4} = set_resp_expires(Req4, State3),
@@ -790,9 +790,9 @@ set_resp_body(Req=#http_req{method=Method},
 			State5 = State4#state{handler_state=HandlerState},
 			{ok, Req7} = case Body of
 				{stream, Len, Fun1} ->
-					cowboy_http_req:set_resp_body_fun(Len, Fun1, Req6);
+					cowboy_req:set_resp_body_fun(Len, Fun1, Req6);
 				_Contents ->
-					cowboy_http_req:set_resp_body(Body, Req6)
+					cowboy_req:set_resp_body(Body, Req6)
 			end,
 			multiple_choices(Req7, State5)
 	end;
@@ -810,7 +810,7 @@ set_resp_etag(Req, State) ->
 		undefined ->
 			{Req2, State2};
 		Etag ->
-			{ok, Req3} = cowboy_http_req:set_resp_header(
+			{ok, Req3} = cowboy_req:set_resp_header(
 				<<"ETag">>, encode_etag(Etag), Req2),
 			{Req3, State2}
 	end.
@@ -826,7 +826,7 @@ set_resp_expires(Req, State) ->
 			{Req2, State2};
 		Expires ->
 			ExpiresStr = httpd_util:rfc1123_date(Expires),
-			{ok, Req3} = cowboy_http_req:set_resp_header(
+			{ok, Req3} = cowboy_req:set_resp_header(
 				<<"Expires">>, ExpiresStr, Req2),
 			{Req3, State2}
 	end.
@@ -907,7 +907,7 @@ next(Req, State, StatusCode) when is_integer(StatusCode) ->
 
 %% @todo Allow some sort of callback for custom error pages.
 respond(Req, State, StatusCode) ->
-	{ok, Req2} = cowboy_http_req:reply(StatusCode, Req),
+	{ok, Req2} = cowboy_req:reply(StatusCode, Req),
 	terminate(Req2, State).
 
 terminate(Req, #state{handler=Handler, handler_state=HandlerState}) ->

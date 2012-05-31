@@ -44,15 +44,15 @@
 %% ==== Examples ====
 %% ```
 %% %% Serve files from /var/www/ under http://example.com/static/
-%% {[<<"static">>, '...'], cowboy_http_static,
+%% {[<<"static">>, '...'], cowboy_static,
 %%     [{directory, "/var/www"}]}
 %%
 %% %% Serve files from the current working directory under http://example.com/static/
-%% {[<<"static">>, '...'], cowboy_http_static,
+%% {[<<"static">>, '...'], cowboy_static,
 %%     [{directory, <<"./">>}]}
 %%
 %% %% Serve files from cowboy/priv/www under http://example.com/
-%% {['...'], cowboy_http_static,
+%% {['...'], cowboy_static,
 %%     [{directory, {priv_dir, cowboy, [<<"www">>]}}]}
 %% '''
 %%
@@ -62,7 +62,7 @@
 %% `application/octet-stream'. This can be overriden by supplying a list
 %% of filename extension to mimetypes pairs in the `mimetypes' option.
 %% The filename extension should be a binary string including the leading dot.
-%% The mimetypes must be of a type that the `cowboy_http_rest' protocol can
+%% The mimetypes must be of a type that the `cowboy_rest' protocol can
 %% handle.
 %%
 %% The <a href="https://github.com/spawngrid/mimetypes">spawngrid/mimetypes</a>
@@ -74,14 +74,14 @@
 %% ==== Example ====
 %% ```
 %% %% Use a static list of content types.
-%% {[<<"static">>, '...'], cowboy_http_static,
+%% {[<<"static">>, '...'], cowboy_static,
 %%     [{directory, {priv_dir, cowboy, []}},
 %%      {mimetypes, [
 %%          {<<".css">>, [<<"text/css">>]},
 %%          {<<".js">>, [<<"application/javascript">>]}]}]}
 %%
 %% %% Use the default database in the mimetypes application.
-%% {[<<"static">>, '...', cowboy_http_static,
+%% {[<<"static">>, '...', cowboy_static,
 %%     [{directory, {priv_dir, cowboy, []}},
 %%      {mimetypes, {fun mimetypes:path_to_mimes/2, default}}]]}
 %% '''
@@ -110,17 +110,17 @@
 %% ====  Examples ====
 %% ```
 %% %% A value of default is equal to not specifying the option.
-%% {[<<"static">>, '...', cowboy_http_static,
+%% {[<<"static">>, '...', cowboy_static,
 %%     [{directory, {priv_dir, cowboy, []}},
 %%      {etag, default}]]}
 %%
 %% %% Use all avaliable ETag function arguments to generate a header value.
-%% {[<<"static">>, '...', cowboy_http_static,
+%% {[<<"static">>, '...', cowboy_static,
 %%     [{directory, {priv_dir, cowboy, []}},
 %%      {etag, {attributes, [filepath, filesize, inode, mtime]}}]]}
 %%
 %% %% Use a user defined function to generate a strong ETag header value.
-%% {[<<"static">>, '...', cowboy_http_static,
+%% {[<<"static">>, '...', cowboy_static,
 %%     [{directory, {priv_dir, cowboy, []}},
 %%      {etag, {fun generate_strong_etag/2, strong_etag_extra}}]]}
 %%
@@ -153,30 +153,30 @@
 %%
 %% ```
 %% %% Serve cowboy/priv/www/index.html as http://example.com/
-%% {[], cowboy_http_static,
+%% {[], cowboy_static,
 %%     [{directory, {priv_dir, cowboy, [<<"www">>]}}
 %%      {file, <<"index.html">>}]}
 %%
 %% %% Serve cowboy/priv/www/page.html under http://example.com/*/page
-%% {['*', <<"page">>], cowboy_http_static,
+%% {['*', <<"page">>], cowboy_static,
 %%     [{directory, {priv_dir, cowboy, [<<"www">>]}}
 %%      {file, <<"page.html">>}]}.
 %%
 %% %% Always serve cowboy/priv/www/other.html under http://example.com/other
-%% {[<<"other">>, '...'], cowboy_http_static,
+%% {[<<"other">>, '...'], cowboy_static,
 %%     [{directory, {priv_dir, cowboy, [<<"www">>]}}
 %%      {file, "other.html"}]}
 %% '''
--module(cowboy_http_static).
+-module(cowboy_static).
 
 %% include files
 -include("http.hrl").
 -include_lib("kernel/include/file.hrl").
 
-%% cowboy_http_protocol callbacks
+%% cowboy_protocol callbacks
 -export([init/3]).
 
-%% cowboy_http_rest callbacks
+%% cowboy_rest callbacks
 -export([rest_init/2, allowed_methods/2, malformed_request/2,
 	resource_exists/2, forbidden/2, last_modified/2, generate_etag/2,
 	content_types_provided/2, file_contents/2]).
@@ -202,7 +202,7 @@
 
 %% @private Upgrade from HTTP handler to REST handler.
 init({_Transport, http}, _Req, _Opts) ->
-	{upgrade, protocol, cowboy_http_rest}.
+	{upgrade, protocol, cowboy_rest}.
 
 
 %% @private Set up initial state of REST handler.
@@ -225,7 +225,7 @@ rest_init(Req, Opts) ->
 	end,
 	{Filepath, Req1} = case lists:keyfind(file, 1, Opts) of
 		{_, Filepath2} -> {filepath_path(Filepath2), Req};
-		false -> cowboy_http_req:path_info(Req)
+		false -> cowboy_req:path_info(Req)
 	end,
 	State = case check_path(Filepath) of
 		error ->
@@ -314,7 +314,7 @@ content_types_provided(Req, #state{filepath=Filepath,
 -spec file_contents(#http_req{}, #state{}) -> tuple().
 file_contents(Req, #state{filepath=Filepath,
 		fileinfo={ok, #file_info{size=Filesize}}}=State) ->
-	{ok, Transport, Socket} = cowboy_http_req:transport(Req),
+	{ok, Transport, Socket} = cowboy_req:transport(Req),
 	Writefile = content_function(Transport, Socket, Filepath),
 	{{stream, Filesize, Writefile}, Req, State}.
 
@@ -326,13 +326,13 @@ file_contents(Req, #state{filepath=Filepath,
 -spec content_function(module(), inet:socket(), binary()) ->
 	fun(() -> {sent, non_neg_integer()}).
 content_function(Transport, Socket, Filepath) ->
-	%% `file:sendfile/2' will only work with the `cowboy_tcp_transport'
+	%% `file:sendfile/2' will only work with the `ranch_tcp'
 	%% transport module. SSL or future SPDY transports that require the
 	%% content to be encrypted or framed as the content is sent.
 	case erlang:function_exported(file, sendfile, 2) of
 		false ->
 			fun() -> sfallback(Transport, Socket, Filepath) end;
-		_ when Transport =/= cowboy_tcp_transport ->
+		_ when Transport =/= ranch_tcp ->
 			fun() -> sfallback(Transport, Socket, Filepath) end;
 		true ->
 			fun() -> sendfile(Socket, Filepath) end

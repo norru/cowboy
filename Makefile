@@ -9,10 +9,10 @@ all: app
 
 # Application.
 
-deps:
+deps/ranch:
 	@$(REBAR) get-deps
 
-app: deps
+app: deps/ranch
 	@$(REBAR) compile
 
 clean:
