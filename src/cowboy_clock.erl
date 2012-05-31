@@ -21,9 +21,19 @@
 -module(cowboy_clock).
 -behaviour(gen_server).
 
--export([start_link/0, stop/0, rfc1123/0, rfc2109/1]). %% API.
--export([init/1, handle_call/3, handle_cast/2,
-	handle_info/2, terminate/2, code_change/3]). %% gen_server.
+%% API.
+-export([start_link/0]).
+-export([stop/0]).
+-export([rfc1123/0]).
+-export([rfc2109/1]).
+
+%% gen_server.
+-export([init/1]).
+-export([handle_call/3]).
+-export([handle_cast/2]).
+-export([handle_info/2]).
+-export([terminate/2]).
+-export([code_change/3]).
 
 -record(state, {
 	universaltime = undefined :: undefined | calendar:datetime(),
@@ -61,8 +71,8 @@ rfc1123() ->
 %% HTTP responses.
 -spec rfc2109(calendar:datetime()) -> binary().
 rfc2109(LocalTime) ->
-	{{YYYY,MM,DD},{Hour,Min,Sec}} =
-	case calendar:local_time_to_universal_time_dst(LocalTime) of
+	{{YYYY,MM,DD},{Hour,Min,Sec}} = case
+			calendar:local_time_to_universal_time_dst(LocalTime) of
 	    [Gmt]   -> Gmt;
 	    [_,Gmt] -> Gmt;
 		[] ->
@@ -87,12 +97,9 @@ rfc2109(LocalTime) ->
 	SecBin = pad_int(Sec),
 	WeekDay = weekday(Wday),
 	Month = month(MM),
-	<<WeekDay/binary, ", ",
-	DayBin/binary, " ", Month/binary, " ",
-	YearBin/binary, " ",
-	HourBin/binary, ":",
-	MinBin/binary, ":",
-	SecBin/binary, " GMT">>.
+	<<	WeekDay/binary, ", ", DayBin/binary, " ", Month/binary, " ",
+		YearBin/binary, " ", HourBin/binary, ":", MinBin/binary, ":",
+		SecBin/binary, " GMT">>.
 
 %% gen_server.
 

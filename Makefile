@@ -52,7 +52,7 @@ intct:
 
 build-plt:
 	@$(DIALYZER) --build_plt --output_plt .$(PROJECT).plt \
-		--apps kernel stdlib sasl inets crypto public_key ssl
+		--apps kernel stdlib sasl tools inets crypto public_key ssl deps/ranch
 
 dialyze:
 	@$(DIALYZER) --src src --plt .$(PROJECT).plt --no_native \

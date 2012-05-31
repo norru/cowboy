@@ -17,7 +17,10 @@
 
 -module(cowboy_cookies).
 
--export([parse_cookie/1, cookie/3, cookie/2]). %% API.
+%% API.
+-export([parse_cookie/1]).
+-export([cookie/3]).
+-export([cookie/2]).
 
 %% Types.
 -type kv() :: {Name::binary(), Value::binary()}.

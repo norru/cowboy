@@ -127,16 +127,15 @@ groups() ->
 	].
 
 init_per_suite(Config) ->
-	application:start(inets),
-	application:start(ranch),
-	application:start(cowboy),
+	ok = application:start(inets),
+	ok = application:start(ranch),
+	ok = application:start(cowboy),
 	Config.
 
 end_per_suite(_Config) ->
-	application:stop(cowboy),
-	application:stop(ranch),
-	application:stop(inets),
-	ok.
+	ok = application:stop(cowboy),
+	ok = application:stop(ranch),
+	ok = application:stop(inets).
 
 init_per_group(http, Config) ->
 	Port = 33080,
