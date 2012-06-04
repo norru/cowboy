@@ -66,6 +66,7 @@
 %% Response API.
 -export([set_resp_cookie/4]).
 -export([set_resp_header/3]).
+-export([delete_resp_header/2]).
 -export([set_resp_body/2]).
 -export([set_resp_body_fun/3]).
 -export([has_resp_header/2]).
@@ -77,15 +78,79 @@
 -export([chunked_reply/3]).
 -export([chunk/2]).
 -export([upgrade_reply/3]).
+-export([transport/1]).
 
 %% Misc API.
 -export([compact/1]).
--export([transport/1]).
+-export([to_proplist/1]).
 
--include("http.hrl").
+%% Private getter/setter API.
+-export([new/5]).
+-export([new/10]).
+-export([lock/1]).
+-export([add_header/3]).
+-export([get_body_state/1]).
+-export([get_buffer/1]).
+-export([get_connection/1]).
+-export([get_host/1]).
+-export([get_method/1]).
+-export([get_path/1]).
+-export([get_port/1]).
+-export([get_raw_host/1]).
+-export([get_raw_path/1]).
+-export([get_raw_qs/1]).
+-export([get_resp_state/1]).
+-export([get_version/1]).
+-export([set_bindings/4]).
+-export([set_buffer/2]).
+-export([set_connection/2]).
+-export([set_host/4]).
+-export([set_meta/3]).
 
-%% @todo opaque
--type req() :: #http_req{}.
+-record(http_req, {
+	%% Transport.
+	socket = undefined :: undefined | inet:socket(),
+	transport = undefined :: undefined | module(),
+	connection = keepalive :: keepalive | close,
+
+	%% Request.
+	pid = undefined :: pid(),
+	method = 'GET' :: cowboy_http:method(),
+	version = {1, 1} :: cowboy_http:version(),
+	peer = undefined :: undefined |
+								{inet:ip_address(), inet:port_number()},
+	host = undefined :: undefined | cowboy_dispatcher:tokens(),
+	host_info = undefined :: undefined | cowboy_dispatcher:tokens(),
+	raw_host = undefined :: undefined | binary(),
+	port = undefined :: undefined | inet:port_number(),
+	path = undefined :: undefined | '*' | cowboy_dispatcher:tokens(),
+	path_info = undefined :: undefined | cowboy_dispatcher:tokens(),
+	raw_path = undefined :: undefined | binary(),
+	qs_vals = undefined :: undefined | list({binary(), binary() | true}),
+	raw_qs = undefined :: undefined | binary(),
+	bindings = undefined :: undefined | cowboy_dispatcher:bindings(),
+	headers = [] :: cowboy_http:headers(),
+	p_headers = [] :: [any()], %% @todo Improve those specs.
+	cookies = undefined :: undefined | [{binary(), binary()}],
+	meta = [] :: [{atom(), any()}],
+
+	%% Request body.
+	body_state = waiting :: waiting | done | {stream, fun(), any(), fun()}
+		| {multipart, non_neg_integer(), fun()},
+	buffer = <<>> :: binary(),
+
+	%% Response.
+	resp_state = waiting :: locked | waiting | chunks | done,
+	resp_headers = [] :: cowboy_http:headers(),
+	resp_body = <<>> :: iodata() | {non_neg_integer(),
+		fun(() -> {sent, non_neg_integer()})},
+
+	%% Callbacks.
+	onresponse = undefined :: undefined | cowboy_protocol:onresponse_fun(),
+	urldecode :: cowboy_protocol:urldecode_fun()
+}).
+
+-opaque req() :: #http_req{}.
 -export_type([req/0]).
 
 %% Request API.
@@ -133,7 +198,8 @@ peer_addr(Req = #http_req{}) ->
 	{PeerAddr, Req3}.
 
 %% @doc Return the tokens for the hostname requested.
--spec host(Req) -> {cowboy_dispatcher:tokens(), Req} when Req::req().
+-spec host(Req) -> {undefined | cowboy_dispatcher:tokens(), Req}
+	when Req::req().
 host(Req) ->
 	{Req#http_req.host, Req}.
 
@@ -667,6 +733,13 @@ set_resp_header(Name, Value, Req=#http_req{resp_headers=RespHeaders}) ->
 	NameBin = header_to_binary(Name),
 	{ok, Req#http_req{resp_headers=[{NameBin, Value}|RespHeaders]}}.
 
+%% @doc Remove a header from the pre-set response.
+-spec delete_resp_header(cowboy_http:header(), Req) -> {ok, Req}
+	when Req::req().
+delete_resp_header(Name, Req=#http_req{resp_headers=RespHeaders}) ->
+	RespHeaders2 = lists:keydelete(Name, 1, RespHeaders),
+	{ok, Req#http_req{resp_headers=RespHeaders2}}.
+
 %% @doc Add a body to the response.
 %%
 %% The body set here is ignored if the response is later sent using
@@ -696,13 +769,13 @@ set_resp_body_fun(StreamLen, StreamFun, Req) ->
 	{ok, Req#http_req{resp_body={StreamLen, StreamFun}}}.
 
 %% @doc Return whether the given header has been set for the response.
--spec has_resp_header(cowboy_http:header(), #http_req{}) -> boolean().
+-spec has_resp_header(cowboy_http:header(), req()) -> boolean().
 has_resp_header(Name, #http_req{resp_headers=RespHeaders}) ->
 	NameBin = header_to_binary(Name),
 	lists:keymember(NameBin, 1, RespHeaders).
 
 %% @doc Return whether a body has been set for the response.
--spec has_resp_body(#http_req{}) -> boolean().
+-spec has_resp_body(req()) -> boolean().
 has_resp_body(#http_req{resp_body={Length, _}}) ->
 	Length > 0;
 has_resp_body(#http_req{resp_body=RespBody}) ->
@@ -776,7 +849,7 @@ chunked_reply(Status, Headers, Req=#http_req{
 %% @doc Send a chunk of data.
 %%
 %% A chunked reply must have been initiated before calling this function.
--spec chunk(iodata(), #http_req{}) -> ok | {error, atom()}.
+-spec chunk(iodata(), req()) -> ok | {error, atom()}.
 chunk(_Data, #http_req{socket=_Socket, transport=_Transport, method='HEAD'}) ->
 	ok;
 chunk(Data, #http_req{socket=Socket, transport=Transport, version={1, 0}}) ->
@@ -789,12 +862,23 @@ chunk(Data, #http_req{socket=Socket, transport=Transport, resp_state=chunks}) ->
 %% @private
 -spec upgrade_reply(cowboy_http:status(), cowboy_http:headers(), Req)
 	-> {ok, Req} when Req::req().
-upgrade_reply(Status, Headers, Req=#http_req{
-		resp_state=waiting, resp_headers=RespHeaders}) ->
+upgrade_reply(Status, Headers, Req=#http_req{resp_headers=RespHeaders}) ->
 	{_, Req2} = response(Status, Headers, RespHeaders, [
 		{<<"Connection">>, <<"Upgrade">>}
 	], Req),
 	{ok, Req2#http_req{resp_state=done, resp_headers=[], resp_body= <<>>}}.
+
+%% @doc Return the transport module and socket associated with a request.
+%%
+%% This exposes the same socket interface used internally by the HTTP protocol
+%% implementation to developers that needs low level access to the socket.
+%%
+%% It is preferred to use this in conjuction with the stream function support
+%% in `set_resp_body_fun/3' if this is used to write a response body directly
+%% to the socket. This ensures that the response headers are set correctly.
+-spec transport(req()) -> {ok, module(), inet:socket()}.
+transport(#http_req{transport=Transport, socket=Socket}) ->
+	{ok, Transport, Socket}.
 
 %% Misc API.
 
@@ -810,17 +894,155 @@ compact(Req) ->
 		bindings=undefined, headers=[],
 		p_headers=[], cookies=[]}.
 
-%% @doc Return the transport module and socket associated with a request.
-%%
-%% This exposes the same socket interface used internally by the HTTP protocol
-%% implementation to developers that needs low level access to the socket.
-%%
-%% It is preferred to use this in conjuction with the stream function support
-%% in `set_resp_body_fun/3' if this is used to write a response body directly
-%% to the socket. This ensures that the response headers are set correctly.
--spec transport(#http_req{}) -> {ok, module(), inet:socket()}.
-transport(#http_req{transport=Transport, socket=Socket}) ->
-	{ok, Transport, Socket}.
+%% @doc Convert the request object to a proplist.
+-spec to_proplist(req()) -> [{atom(), any()}].
+to_proplist(Req) ->
+	lists:zip(record_info(fields, http_req), tl(tuple_to_list(Req))).
+
+%% Private getter/setter API.
+
+%% @doc Create an empty request object.
+%% @private
+-spec new(inet:socket(), module(), keepalive | close,
+	cowboy_protocol:onresponse_fun(), cowboy_protocol:urldecode_fun())
+	-> req().
+new(Socket, Transport, ConnAtom, OnResponse, URLDec) ->
+	#http_req{socket=Socket, transport=Transport, connection=ConnAtom,
+		pid=self(), onresponse=OnResponse, urldecode=URLDec}.
+
+%% @doc Create a new request object from request line data.
+%% @private
+-spec new(inet:socket(), module(), keepalive | close,
+	cowboy_http:method(), cowboy_http:version(),
+	'*' | cowboy_dispatcher:tokens(), binary(), binary(),
+	cowboy_protocol:onresponse_fun(), cowboy_protocol:urldecode_fun())
+	-> req().
+new(Socket, Transport, ConnAtom, Method, Version,
+		Path, RawPath, RawQs, OnResponse, URLDec) ->
+	#http_req{socket=Socket, transport=Transport, connection=ConnAtom,
+		pid=self(), method=Method, version=Version,
+		path=Path, raw_path=RawPath, raw_qs=RawQs,
+		onresponse=OnResponse, urldecode=URLDec}.
+
+%% @doc Lock the request to prevent any response.
+%% @private
+-spec lock(Req) -> Req when Req::req().
+lock(Req) ->
+	Req#http_req{resp_state=locked}.
+
+%% @doc Add a request header to the object.
+%% @private
+-spec add_header(cowboy_http:header(), iodata(), Req) -> Req when Req::req().
+add_header(Name, Value, Req=#http_req{headers=Headers}) ->
+	Req#http_req{headers=[{Name, Value}|Headers]}.
+
+%% @doc Return the request body state.
+%% @private
+-spec get_body_state(Req::req()) -> waiting | done
+	| {stream, fun(), any(), fun()} | {multipart, non_neg_integer(), fun()}.
+get_body_state(#http_req{body_state=BodyState}) ->
+	BodyState.
+
+%% @doc Return the buffer for this request.
+%% @private
+-spec get_buffer(req()) -> binary().
+get_buffer(#http_req{buffer=Buffer}) ->
+	Buffer.
+
+%% @doc Return the connection mode for this request.
+%% @private
+-spec get_connection(req()) -> keepalive | close.
+get_connection(#http_req{connection=Connection}) ->
+	Connection.
+
+%% @doc Return the host for this request.
+%% @private
+-spec get_host(req()) -> cowboy_dispatcher:tokens().
+get_host(#http_req{host=Host}) ->
+	Host.
+
+%% @doc Return the method for this request.
+%% @private
+-spec get_method(req()) -> cowboy_http:method().
+get_method(#http_req{method=Method}) ->
+	Method.
+
+%% @doc Return the path for this request.
+%% @private
+-spec get_path(req()) -> '*' | cowboy_dispatcher:tokens().
+get_path(#http_req{path=Path}) ->
+	Path.
+
+%% @doc Return the port for this request.
+%% @private
+-spec get_port(req()) -> inet:port_number().
+get_port(#http_req{port=Port}) ->
+	Port.
+
+%% @doc Return the raw host for this request.
+%% @private
+-spec get_raw_host(req()) -> undefined | binary().
+get_raw_host(#http_req{raw_host=RawHost}) ->
+	RawHost.
+
+%% @doc Return the raw path for this request.
+%% @private
+-spec get_raw_path(req()) -> undefined | binary().
+get_raw_path(#http_req{raw_path=RawPath}) ->
+	RawPath.
+
+%% @doc Return the raw host for this request.
+%% @private
+-spec get_raw_qs(req()) -> undefined | binary().
+get_raw_qs(#http_req{raw_qs=RawQs}) ->
+	RawQs.
+
+%% @doc Return the response state.
+%% @private
+-spec get_resp_state(Req::req()) -> locked | waiting | chunks | done.
+get_resp_state(#http_req{resp_state=RespState}) ->
+	RespState.
+
+%% @doc Return the version for this request.
+%% @private
+-spec get_version(req()) -> cowboy_http:version().
+get_version(#http_req{version=Version}) ->
+	Version.
+
+%% @doc Set the bindings found during dispatching.
+%% @private
+-spec set_bindings(cowboy_dispatcher:bindings(),
+	undefined | cowboy_dispatcher:tokens(),
+	undefined | cowboy_dispatcher:tokens(),
+	Req) -> Req when Req::req().
+set_bindings(Bindings, HostInfo, PathInfo, Req) ->
+	Req#http_req{bindings=Bindings, host_info=HostInfo, path_info=PathInfo}.
+
+%% @doc Set the buffer read from the socket.
+%% @private
+-spec set_buffer(binary(), Req) -> Req when Req::req().
+set_buffer(Buffer, Req) ->
+	Req#http_req{buffer=Buffer}.
+
+%% @doc Set the connection mode for this request.
+%% @private
+-spec set_connection(keepalive | close, Req) -> Req when Req::req().
+set_connection(Connection, Req) ->
+	Req#http_req{connection=Connection}.
+
+%% @doc Set the host information for the request.
+%% @private
+-spec set_host(cowboy_dispatcher:tokens(), binary(), inet:port_number(),
+	Req) -> Req when Req::req().
+set_host(Host, RawHost, Port, Req) ->
+	Req#http_req{host=Host, raw_host=RawHost, port=Port}.
+
+%% @doc Set metadata information about the request.
+%% @private
+-spec set_meta(atom(), any(), Req) -> Req when Req::req().
+set_meta(Name, Value, Req=#http_req{meta=Meta}) ->
+	Meta2 = lists:keydelete(Name, 1, Meta),
+	Req#http_req{meta=[{Name, Value}|Meta2]}.
 
 %% Internal.
 

@@ -170,7 +170,6 @@
 -module(cowboy_static).
 
 %% include files
--include("http.hrl").
 -include_lib("kernel/include/file.hrl").
 
 %% cowboy_protocol callbacks
@@ -210,7 +209,7 @@ init({_Transport, http}, _Req, _Opts) ->
 	{upgrade, protocol, cowboy_rest}.
 
 %% @private Set up initial state of REST handler.
--spec rest_init(#http_req{}, list()) -> {ok, #http_req{}, #state{}}.
+-spec rest_init(Req, list()) -> {ok, Req, #state{}} when Req::cowboy_req:req().
 rest_init(Req, Opts) ->
 	Directory = proplists:get_value(directory, Opts),
 	Directory1 = directory_path(Directory),
@@ -244,22 +243,22 @@ rest_init(Req, Opts) ->
 	{ok, Req1, State}.
 
 %% @private Only allow GET and HEAD requests on files.
--spec allowed_methods(#http_req{}, #state{}) ->
-		{[atom()], #http_req{}, #state{}}.
+-spec allowed_methods(Req, #state{}) -> {[atom()], Req, #state{}}
+	when Req::cowboy_req:req().
 allowed_methods(Req, State) ->
 	{['GET', 'HEAD'], Req, State}.
 
 %% @private
--spec malformed_request(#http_req{}, #state{}) ->
-		{boolean(), #http_req{}, #state{}}.
+-spec malformed_request(Req, #state{}) -> {boolean(), Req, #state{}}
+	when Req::cowboy_req:req().
 malformed_request(Req, #state{filepath=error}=State) ->
 	{true, Req, State};
 malformed_request(Req, State) ->
 	{false, Req, State}.
 
 %% @private Check if the resource exists under the document root.
--spec resource_exists(#http_req{}, #state{}) ->
-		{boolean(), #http_req{}, #state{}}.
+-spec resource_exists(Req, #state{}) -> {boolean(), Req, #state{}}
+	when Req::cowboy_req:req().
 resource_exists(Req, #state{fileinfo={error, _}}=State) ->
 	{false, Req, State};
 resource_exists(Req, #state{fileinfo={ok, Fileinfo}}=State) ->
@@ -268,7 +267,8 @@ resource_exists(Req, #state{fileinfo={ok, Fileinfo}}=State) ->
 %% @private
 %% Access to a file resource is forbidden if it exists and the local node does
 %% not have permission to read it. Directory listings are always forbidden.
--spec forbidden(#http_req{}, #state{}) -> {boolean(), #http_req{}, #state{}}.
+-spec forbidden(Req, #state{}) -> {boolean(), Req, #state{}}
+	when Req::cowboy_req:req().
 forbidden(Req, #state{fileinfo={_, #file_info{type=directory}}}=State) ->
 	{true, Req, State};
 forbidden(Req, #state{fileinfo={error, eacces}}=State) ->
@@ -279,16 +279,16 @@ forbidden(Req, #state{fileinfo={ok, #file_info{access=Access}}}=State) ->
 	{not (Access =:= read orelse Access =:= read_write), Req, State}.
 
 %% @private Read the time a file system system object was last modified.
--spec last_modified(#http_req{}, #state{}) ->
-		{calendar:datetime(), #http_req{}, #state{}}.
+-spec last_modified(Req, #state{}) -> {calendar:datetime(), Req, #state{}}
+	when Req::cowboy_req:req().
 last_modified(Req, #state{fileinfo={ok, #file_info{mtime=Modified}}}=State) ->
 	{Modified, Req, State}.
 
 %% @private Generate the ETag header value for this file.
 %% The ETag header value is only generated if the resource is a file that
 %% exists in document root.
--spec generate_etag(#http_req{}, #state{}) ->
-	{undefined | binary(), #http_req{}, #state{}}.
+-spec generate_etag(Req, #state{}) -> {undefined | binary(), Req, #state{}}
+	when Req::cowboy_req:req().
 generate_etag(Req, #state{fileinfo={_, #file_info{type=regular, inode=INode,
 		mtime=Modified, size=Filesize}}, filepath=Filepath,
 		etag_fun={ETagFun, ETagData}}=State) ->
@@ -300,7 +300,7 @@ generate_etag(Req, State) ->
 	{undefined, Req, State}.
 
 %% @private Return the content type of a file.
--spec content_types_provided(#http_req{}, #state{}) -> tuple().
+-spec content_types_provided(cowboy_req:req(), #state{}) -> tuple().
 content_types_provided(Req, #state{filepath=Filepath,
 		mimetypes={MimetypesFun, MimetypesData}}=State) ->
 	Mimetypes = [{T, file_contents}
@@ -308,7 +308,7 @@ content_types_provided(Req, #state{filepath=Filepath,
 	{Mimetypes, Req, State}.
 
 %% @private Return a function that writes a file directly to the socket.
--spec file_contents(#http_req{}, #state{}) -> tuple().
+-spec file_contents(cowboy_req:req(), #state{}) -> tuple().
 file_contents(Req, #state{filepath=Filepath,
 		fileinfo={ok, #file_info{size=Filesize}}}=State) ->
 	{ok, Transport, Socket} = cowboy_req:transport(Req),

@@ -26,6 +26,9 @@
 	handler :: atom(),
 	handler_state :: any(),
 
+	%% Request method.
+	method = undefined :: cowboy_http:method(),
+
 	%% Media type.
 	content_types_p = [] ::
 		[{{binary(), binary(), [{binary(), binary()}]}, atom()}],
@@ -46,34 +49,31 @@
 	expires :: undefined | no_call | calendar:datetime()
 }).
 
--include("http.hrl").
-
 %% @doc Upgrade a HTTP request to the REST protocol.
 %%
 %% You do not need to call this function manually. To upgrade to the REST
 %% protocol, you simply need to return <em>{upgrade, protocol, {@module}}</em>
 %% in your <em>cowboy_http_handler:init/3</em> handler function.
--spec upgrade(pid(), module(), any(), #http_req{})
-	-> {ok, #http_req{}} | close.
+-spec upgrade(pid(), module(), any(), Req)
+	-> {ok, Req} | close when Req::cowboy_req:req().
 upgrade(_ListenerPid, Handler, Opts, Req) ->
 	try
+		{Method, Req2} = cowboy_req:method(Req),
 		case erlang:function_exported(Handler, rest_init, 2) of
 			true ->
-				case Handler:rest_init(Req, Opts) of
-					{ok, Req2, HandlerState} ->
-						service_available(Req2, #state{handler=Handler,
-							handler_state=HandlerState})
-				end;
+				{ok, Req3, HandlerState} = Handler:rest_init(Req2, Opts),
+				service_available(Req3, #state{handler=Handler,
+					handler_state=HandlerState, method=Method});
 			false ->
-				service_available(Req, #state{handler=Handler})
+				service_available(Req2, #state{handler=Handler, method=Method})
 		end
 	catch Class:Reason ->
-		PLReq = lists:zip(record_info(fields, http_req), tl(tuple_to_list(Req))),
 		error_logger:error_msg(
 			"** Handler ~p terminating in rest_init/3~n"
 			"   for the reason ~p:~p~n** Options were ~p~n"
 			"** Request was ~p~n** Stacktrace: ~p~n~n",
-			[Handler, Class, Reason, Opts, PLReq, erlang:get_stacktrace()]),
+			[Handler, Class, Reason, Opts,
+			cowboy_req:to_proplist(Req), erlang:get_stacktrace()]),
 		{ok, _Req2} = cowboy_req:reply(500, Req),
 		close
 	end.
@@ -82,7 +82,7 @@ service_available(Req, State) ->
 	expect(Req, State, service_available, true, fun known_methods/2, 503).
 
 %% known_methods/2 should return a list of atoms or binary methods.
-known_methods(Req=#http_req{method=Method}, State) ->
+known_methods(Req, State=#state{method=Method}) ->
 	case call(Req, State, known_methods) of
 		no_call when Method =:= 'HEAD'; Method =:= 'GET'; Method =:= 'POST';
 					Method =:= 'PUT'; Method =:= 'DELETE'; Method =:= 'TRACE';
@@ -104,7 +104,7 @@ uri_too_long(Req, State) ->
 	expect(Req, State, uri_too_long, false, fun allowed_methods/2, 414).
 
 %% allowed_methods/2 should return a list of atoms or binary methods.
-allowed_methods(Req=#http_req{method=Method}, State) ->
+allowed_methods(Req, State=#state{method=Method}) ->
 	case call(Req, State, allowed_methods) of
 		no_call when Method =:= 'HEAD'; Method =:= 'GET' ->
 			next(Req, State, fun malformed_request/2);
@@ -169,7 +169,7 @@ valid_entity_length(Req, State) ->
 
 %% If you need to add additional headers to the response at this point,
 %% you should do it directly in the options/2 call using set_resp_headers.
-options(Req=#http_req{method='OPTIONS'}, State) ->
+options(Req, State=#state{method='OPTIONS'}) ->
 	case call(Req, State, options) of
 		{halt, Req2, HandlerState} ->
 			terminate(Req2, State#state{handler_state=HandlerState});
@@ -194,7 +194,7 @@ options(Req, State) ->
 %% resources a little more readable, this is a lot less efficient. An example
 %% of such a return value would be:
 %%    {<<"text/html">>, to_html}
-content_types_provided(Req=#http_req{meta=Meta}, State) ->
+content_types_provided(Req, State) ->
 	case call(Req, State, content_types_provided) of
 		no_call ->
 			not_acceptable(Req, State);
@@ -210,8 +210,8 @@ content_types_provided(Req=#http_req{meta=Meta}, State) ->
 			case Accept of
 				undefined ->
 					{PMT, _Fun} = HeadCTP = hd(CTP2),
-					languages_provided(
-						Req3#http_req{meta=[{media_type, PMT}|Meta]},
+					Req4 = cowboy_req:set_meta(media_type, PMT, Req3),
+					languages_provided(Req4,
 						State2#state{content_type_a=HeadCTP});
 				Accept ->
 					Accept2 = prioritize_accept(Accept),
@@ -274,13 +274,13 @@ match_media_type(Req, State, Accept,
 match_media_type(Req, State, Accept, [_Any|Tail], MediaType) ->
 	match_media_type(Req, State, Accept, Tail, MediaType).
 
-match_media_type_params(Req=#http_req{meta=Meta}, State, Accept,
+match_media_type_params(Req, State, Accept,
 		[Provided = {PMT = {_TP, _STP, Params_P}, _Fun}|Tail],
 		MediaType = {{_TA, _STA, Params_A}, _QA, _APA}) ->
 	case lists:sort(Params_P) =:= lists:sort(Params_A) of
 		true ->
-			languages_provided(Req#http_req{meta=[{media_type, PMT}|Meta]},
-				State#state{content_type_a=Provided});
+			Req2 = cowboy_req:set_meta(media_type, PMT, Req),
+			languages_provided(Req2, State#state{content_type_a=Provided});
 		false ->
 			match_media_type(Req, State, Accept, Tail, MediaType)
 	end.
@@ -346,10 +346,11 @@ match_language(Req, State, Accept, [Provided|Tail],
 			match_language(Req, State, Accept, Tail, Language)
 	end.
 
-set_language(Req=#http_req{meta=Meta}, State=#state{language_a=Language}) ->
+set_language(Req, State=#state{language_a=Language}) ->
 	{ok, Req2} = cowboy_req:set_resp_header(
 		<<"Content-Language">>, Language, Req),
-	charsets_provided(Req2#http_req{meta=[{language, Language}|Meta]}, State).
+	Req3 = cowboy_req:set_meta(language, Language, Req2),
+	charsets_provided(Req3, State).
 
 %% charsets_provided should return a list of binary values indicating
 %% which charsets are accepted by the resource.
@@ -403,7 +404,7 @@ match_charset(Req, State, _Accept, [Provided|_Tail],
 match_charset(Req, State, Accept, [_Provided|Tail], Charset) ->
 	match_charset(Req, State, Accept, Tail, Charset).
 
-set_content_type(Req=#http_req{meta=Meta}, State=#state{
+set_content_type(Req, State=#state{
 		content_type_a={{Type, SubType, Params}, _Fun},
 		charset_a=Charset}) ->
 	ParamsBin = set_content_type_build_params(Params, []),
@@ -414,7 +415,8 @@ set_content_type(Req=#http_req{meta=Meta}, State=#state{
 	end,
 	{ok, Req2} = cowboy_req:set_resp_header(
 		<<"Content-Type">>, ContentType2, Req),
-	encodings_provided(Req2#http_req{meta=[{charset, Charset}|Meta]}, State).
+	Req3 = cowboy_req:set_meta(charset, Charset, Req2),
+	encodings_provided(Req3, State).
 
 set_content_type_build_params([], []) ->
 	<<>>;
@@ -540,7 +542,7 @@ if_none_match(Req, State, EtagsList) ->
 			end
 	end.
 
-precondition_is_head_get(Req=#http_req{method=Method}, State)
+precondition_is_head_get(Req, State=#state{method=Method})
 		when Method =:= 'HEAD'; Method =:= 'GET' ->
 	not_modified(Req, State);
 precondition_is_head_get(Req, State) ->
@@ -574,9 +576,8 @@ if_modified_since(Req, State, IfModifiedSince) ->
 			end
 	end.
 
-not_modified(Req=#http_req{resp_headers=RespHeaders}, State) ->
-	RespHeaders2 = lists:keydelete(<<"Content-Type">>, 1, RespHeaders),
-	Req2 = Req#http_req{resp_headers=RespHeaders2},
+not_modified(Req, State) ->
+	{ok, Req2} = cowboy_req:delete_resp_header(<<"Content-Type">>, Req),
 	{Req3, State2} = set_resp_etag(Req2, State),
 	{Req4, State3} = set_resp_expires(Req3, State2),
 	respond(Req4, State3, 304).
@@ -584,7 +585,7 @@ not_modified(Req=#http_req{resp_headers=RespHeaders}, State) ->
 precondition_failed(Req, State) ->
 	respond(Req, State, 412).
 
-is_put_to_missing_resource(Req=#http_req{method='PUT'}, State) ->
+is_put_to_missing_resource(Req, State=#state{method='PUT'}) ->
 	moved_permanently(Req, State, fun is_conflict/2);
 is_put_to_missing_resource(Req, State) ->
 	previously_existed(Req, State).
@@ -626,7 +627,7 @@ moved_temporarily(Req, State) ->
 			is_post_to_missing_resource(Req, State, 410)
 	end.
 
-is_post_to_missing_resource(Req=#http_req{method='POST'}, State, OnFalse) ->
+is_post_to_missing_resource(Req, State=#state{method='POST'}, OnFalse) ->
 	allow_missing_post(Req, State, OnFalse);
 is_post_to_missing_resource(Req, State, OnFalse) ->
 	respond(Req, State, OnFalse).
@@ -634,11 +635,11 @@ is_post_to_missing_resource(Req, State, OnFalse) ->
 allow_missing_post(Req, State, OnFalse) ->
 	expect(Req, State, allow_missing_post, true, fun post_is_create/2, OnFalse).
 
-method(Req=#http_req{method='DELETE'}, State) ->
+method(Req, State=#state{method='DELETE'}) ->
 	delete_resource(Req, State);
-method(Req=#http_req{method='POST'}, State) ->
+method(Req, State=#state{method='POST'}) ->
 	post_is_create(Req, State);
-method(Req=#http_req{method='PUT'}, State) ->
+method(Req, State=#state{method='PUT'}) ->
 	is_conflict(Req, State);
 method(Req, State) ->
 	set_resp_body(Req, State).
@@ -658,7 +659,7 @@ post_is_create(Req, State) ->
 %% When the POST method can create new resources, create_path/2 will be called
 %% and is expected to return the full path to the new resource
 %% (including the leading /).
-create_path(Req=#http_req{meta=Meta}, State) ->
+create_path(Req, State) ->
 	case call(Req, State, create_path) of
 		{halt, Req2, HandlerState} ->
 			terminate(Req2, State#state{handler_state=HandlerState});
@@ -667,12 +668,14 @@ create_path(Req=#http_req{meta=Meta}, State) ->
 			State2 = State#state{handler_state=HandlerState},
 			{ok, Req3} = cowboy_req:set_resp_header(
 				<<"Location">>, Location, Req2),
-			put_resource(Req3#http_req{meta=[{put_path, Path}|Meta]},
-				State2, 303)
+			Req4 = cowboy_req:set_meta(put_path, Path, Req3),
+			put_resource(Req4, State2, 303)
 	end.
 
-create_path_location(#http_req{transport=Transport, raw_host=Host,
-		port=Port}, Path) ->
+create_path_location(Req, Path) ->
+	{ok, Transport, _} = cowboy_req:transport(Req),
+	{Host, _} = cowboy_req:raw_host(Req),
+	{Port, _} = cowboy_req:port(Req),
 	TransportName = Transport:name(),
 	<< (create_path_location_protocol(TransportName))/binary, "://",
 		Host/binary, (create_path_location_port(TransportName, Port))/binary,
@@ -705,9 +708,10 @@ process_post(Req, State) ->
 is_conflict(Req, State) ->
 	expect(Req, State, is_conflict, false, fun put_resource/2, 409).
 
-put_resource(Req=#http_req{raw_path=RawPath, meta=Meta}, State) ->
-	Req2 = Req#http_req{meta=[{put_path, RawPath}|Meta]},
-	put_resource(Req2, State, fun is_new_resource/2).
+put_resource(Req, State) ->
+	{RawPath, Req2} = cowboy_req:raw_path(Req),
+	Req3 = cowboy_req:set_meta(put_path, RawPath, Req2),
+	put_resource(Req3, State, fun is_new_resource/2).
 
 %% content_types_accepted should return a list of media types and their
 %% associated callback functions in the same format as content_types_provided.
@@ -769,8 +773,7 @@ has_resp_body(Req, State) ->
 %% Set the response headers and call the callback found using
 %% content_types_provided/2 to obtain the request body and add
 %% it to the response.
-set_resp_body(Req=#http_req{method=Method},
-		State=#state{content_type_a={_Type, Fun}})
+set_resp_body(Req, State=#state{method=Method, content_type_a={_Type, Fun}})
 		when Method =:= 'GET'; Method =:= 'HEAD' ->
 	{Req2, State2} = set_resp_etag(Req, State),
 	{LastModified, Req3, State3} = last_modified(Req2, State2),
@@ -913,7 +916,7 @@ respond(Req, State, StatusCode) ->
 terminate(Req, #state{handler=Handler, handler_state=HandlerState}) ->
 	case erlang:function_exported(Handler, rest_terminate, 2) of
 		true -> ok = Handler:rest_terminate(
-			Req#http_req{resp_state=locked}, HandlerState);
+			cowboy_req:lock(Req), HandlerState);
 		false -> ok
 	end,
 	{ok, Req}.
